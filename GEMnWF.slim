@@ -1,0 +1,296 @@
+initialize() {
+	initializeSLiMModelType("nonWF");
+	
+	if (exists("slimgui")){ //seed and K need to be set through the shell script 
+		defineConstant("seed", 1);
+		defineConstant("K", 1000);
+	}
+	setSeed(seed);
+	
+	//burn-in sampling
+	defineConstant("stg_ss",10000); //sample size for burn-in sampling
+	if (K!=100000){
+		defineConstant("BurninEnd", K*10); //as suggested by SLiM manual (Haller & Messer 2023)
+		defineConstant("stg_gen",K); //number of generations between each burn-in sampling
+	}	
+	else{ //simulations with K=100'000 are run for less generations due to their computation time
+		defineConstant("BurninEnd", 100000);
+		defineConstant("stg_gen",K/10);
+	}
+
+	//final pN/pS sampling
+	defineConstant("SampleSize", 24); //sample size for final pN/pS sampling
+	defineConstant("Replicas", 100); //number of final pN/pS sampling replicas
+
+	//genomic parameters
+	defineConstant("g", 300); //total gene number
+	defineConstant("geneLength", 34000); //model gene length set according to average gene length measured across emperor penguin reference genome (ASM69914v1, Zhang G. et al 2014)
+	defineConstant("geneSelCoeff", rep(c(-0.001,-0.01,-0.1),100)); //three selection coefficients are tested here
+	defineConstant("genomeLength", 1.02e7); //resulting model genome length
+	initializeMutationRate(1e-8); //a more realistic mutation rate (4.6e-9 measured through direct estimation on Ficedula albicollis germinal line, Smeds et al 2016) has been tested but it resulted in a too low number of mutations per gene leading to most of gene pN/pS being equal to 0/0 pN/0 0/pS
+	initializeMutationType(0, 0.0, "f", 0.0).convertToSubstitution=T; //neutral mutations
+	defineConstant("m1_domCoeff", 0.5/(1-7071.07*(-0.001))); //dominance coefficients of deleterious mutations are set according to the hs relationship (Henn et al 2016, Kyriazis et al 2020)
+	defineConstant("m1_hetFitEff", 1.0-(0.001*m1_domCoeff));
+	initializeMutationType(1, m1_domCoeff, "f", -0.001).convertToSubstitution=T; //deleterious mutations "m1" s=-0.001
+	initializeGenomicElementType(1, c(1,0), c(2.31,1.0));
+	defineConstant("m2_domCoeff", 0.5/(1-7071.07*(-0.01)));
+	defineConstant("m2_hetFitEff", 1.0-(0.01*m2_domCoeff));
+	initializeMutationType(2, m2_domCoeff, "f", -0.01).convertToSubstitution=T; //deleterious mutations "m2" s=-0.01
+	initializeGenomicElementType(2, c(2,0), c(2.31,1.0));
+	defineConstant("m3_domCoeff", 0.5/(1-7071.07*(-0.1)));
+	defineConstant("m3_hetFitEff", 1.0-(0.1*m3_domCoeff));
+	initializeMutationType(3, m3_domCoeff, "f", -0.1).convertToSubstitution=T; //deleterious mutations "m3" s=-0.1
+	initializeGenomicElementType(3, c(3,0), c(2.31,1.0));
+	counter=1;
+	while (counter<=g){
+		initializeGenomicElement(1, ((counter-1)*geneLength)+(counter-1), (counter*geneLength)+(counter-2));
+		counter=counter+1;
+		initializeGenomicElement(2, ((counter-1)*geneLength)+(counter-1), (counter*geneLength)+(counter-2));
+		counter=counter+1;
+		initializeGenomicElement(3, ((counter-1)*geneLength)+(counter-1), (counter*geneLength)+(counter-2));
+		counter=counter+1;
+	}
+	
+	rates=c(rep(c(1e-8,0.5), g-1),1e-8); //recombination rates is set at 1e-8 within genes and at 0.5 between genes in order to remove linkage effect between genes
+	ends=NULL;
+	for (i in 1:(g-1)){
+		ends=c(ends, (i*geneLength)+(i-2), (i*geneLength)+(i-1));
+	}
+	ends=c(ends,(g*geneLength)+(g-2));
+	initializeRecombinationRate(rates, ends);
+
+	//life history traits, estimated from king penguin populations (Céline Le Bohec personal communication)	
+	defineConstant("FirstBreedingAge", 4);
+	defineConstant("ChicksSurvRate",c(0.3,0.01)); //mean and standard deviation of estimated chicks survival rate
+	defineConstant("AgeBasedMortality", c(1,0.97,0.97,0.97,0.97,0.94,0.93,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.92,0.90,0.80, 0.70,0.60,0.50,0.40,0.30,0.20,0.10,0));
+}
+
+
+function (float)calcIndividualFitness(object<Individual> individuals) //function to measure genomic fitness (i.e. fitness determined by multiplying each mutation fitness effect)
+{
+	IndividualFitness=NULL;
+	for (ind in individuals){
+		indgenomes=ind.genomes;
+		muts=indgenomes.mutations;
+		delmuts=muts[muts.selectionCoeff<0.0];
+		delmuts_hom=unique(delmuts[indgenomes.mutationFrequenciesInGenomes(delmuts)==1.0]);
+		hom_fe=NULL;
+		for (mut in delmuts_hom){
+			hom_fe=c(hom_fe, 1.0+mut.selectionCoeff);}
+		m1muts=delmuts[delmuts.mutationType==m1];
+		m1muts_het=m1muts[indgenomes.mutationFrequenciesInGenomes(m1muts)==0.5];
+		m2muts=delmuts[delmuts.mutationType==m2];
+		m2muts_het=m2muts[indgenomes.mutationFrequenciesInGenomes(m2muts)==0.5];
+		m3muts=delmuts[delmuts.mutationType==m3];
+		m3muts_het=m3muts[indgenomes.mutationFrequenciesInGenomes(m3muts)==0.5];
+		het_fe=c(rep(m1_hetFitEff,size(m1muts_het)),rep(m2_hetFitEff,size(m2muts_het)),rep(m3_hetFitEff,size(m3muts_het)));	
+		if (isNULL(c(hom_fe, het_fe))){
+			ind_fit=1.0;}
+		else {
+			if (any(c(hom_fe,het_fe)<=0.0)){
+				ind_fit=0.0;}
+			else {
+				ind_fit1=1.0;
+				for (i in c(hom_fe, het_fe)){
+					ind_fit1=i*ind_fit1;}
+				if (ind_fit1>=0.0){
+					ind_fit=ind_fit1;}
+				else {
+					ind_fit=0.0;}
+			}
+		}
+		IndividualFitness=c(IndividualFitness, ind_fit);
+	}
+	return IndividualFitness;
+}
+
+function (float)calcIndividualMutationNumber(object<Individual> individuals) //function to measure individual number of mutations
+{
+	totmuts=NULL;
+	neutmuts=NULL;
+	delmuts=NULL;
+	m1muts=NULL;
+	m2muts=NULL;
+	m3muts=NULL;
+	tothommuts=NULL;
+	neuthommuts=NULL;
+	delhommuts=NULL;
+	m1hommuts=NULL;
+	m2hommuts=NULL;
+	m3hommuts=NULL;
+	tothetmuts=NULL;
+	neuthetmuts=NULL;
+	delhetmuts=NULL;
+	m1hetmuts=NULL;
+	m2hetmuts=NULL;
+	m3hetmuts=NULL;
+	counter=0;
+	for (ind in individuals){
+		indgenomes=ind.genomes;
+		indtotmuts=unique(indgenomes.mutations);
+		indneutmuts=indtotmuts[indtotmuts.mutationType==m0];
+		inddelmuts=indtotmuts[indtotmuts.mutationType!=m0];
+		indm1muts=inddelmuts[inddelmuts.mutationType==m1];
+		indm2muts=inddelmuts[inddelmuts.mutationType==m2];
+		indm3muts=inddelmuts[inddelmuts.mutationType==m3];
+		indtothommuts=indtotmuts[indgenomes.mutationFrequenciesInGenomes(indtotmuts)==1.0];
+		indneuthommuts=indneutmuts[indgenomes.mutationFrequenciesInGenomes(indneutmuts)==1.0];
+		inddelhommuts=inddelmuts[indgenomes.mutationFrequenciesInGenomes(inddelmuts)==1.0];
+		indm1hommuts=indm1muts[indgenomes.mutationFrequenciesInGenomes(indm1muts)==1.0];
+		indm2hommuts=indm2muts[indgenomes.mutationFrequenciesInGenomes(indm2muts)==1.0];
+		indm3hommuts=indm3muts[indgenomes.mutationFrequenciesInGenomes(indm3muts)==1.0];
+		totmuts=c(totmuts,size(indtotmuts));
+		neutmuts=c(neutmuts,size(indneutmuts));
+		delmuts=c(delmuts,size(inddelmuts));
+		m1muts=c(m1muts,size(indm1muts));
+		m2muts=c(m2muts,size(indm2muts));
+		m3muts=c(m3muts,size(indm3muts));
+		tothommuts=c(tothommuts,size(indtothommuts));
+		neuthommuts=c(neuthommuts,size(indneuthommuts));
+		delhommuts=c(delhommuts,size(inddelhommuts));
+		m1hommuts=c(m1hommuts,size(indm1hommuts));
+		m2hommuts=c(m2hommuts,size(indm2hommuts));
+		m3hommuts=c(m3hommuts,size(indm3hommuts));
+		tothetmuts=c(tothetmuts,totmuts[counter]-tothommuts[counter]);
+		neuthetmuts=c(neuthetmuts,neutmuts[counter]-neuthommuts[counter]);
+		delhetmuts=c(delhetmuts,delmuts[counter]-delhommuts[counter]);
+		m1hetmuts=c(m1hetmuts,m1muts[counter]-m1hommuts[counter]);
+		m2hetmuts=c(m2hetmuts,m2muts[counter]-m2hommuts[counter]);
+		m3hetmuts=c(m3hetmuts,m3muts[counter]-m3hommuts[counter]);
+		counter=counter+1;
+	}
+	return c(mean(totmuts),mean(neutmuts),mean(delmuts),mean(m1muts),mean(m2muts),mean(m3muts),mean(tothommuts),mean(neuthommuts),mean(delhommuts),mean(m1hommuts),mean(m2hommuts),mean(m3hommuts),mean(tothetmuts),mean(neuthetmuts),mean(delhetmuts),mean(m1hetmuts),mean(m2hetmuts),mean(m3hetmuts));
+}
+
+
+1 early() {
+	sim.addSubpop(1, K);
+	writeFile('GEMnWF_K' + K + '_seed' + getSeed() + '_stg.csv',"Gen,KSF,AllInds_pre,Chicks_pre,Younglings_pre,Adults_pre,AllInds_post,Chicks_post,Younglings_post,Adults_post,age,fit,totmuts,neutmuts,delmuts,m1muts,m2muts,m3muts,indtotmuts,indneutmuts,inddelmuts,indm1muts,indm2muts,indm3muts,indtothommuts,indneuthommuts,inddelhommuts,indm1hommuts,indm2hommuts,indm3hommuts,indtothetmuts,indneuthetmuts,inddelhetmuts,indm1hetmuts,indm2hetmuts,indm3hetmuts");
+}
+
+5:100000 reproduction() { //adults (age >=4) randomly mate each other giving birth to one chick per pair whose survival probability is multiplicatively determined by its genomic fitness and a scaling factor drawn from a normal distribution whose mean and standard deviation are estimated on real king penguin populations (Céline Le Bohec personal communication)
+	AllInds=p1.individuals;
+	Breeders=AllInds[AllInds.age>=FirstBreedingAge];
+	CSR=rnorm(1,ChicksSurvRate[0],ChicksSurvRate[1]);
+	Parents=sample(Breeders, size(Breeders));
+	for (j in seq(0, size(Parents)-2, by=2)) {
+		par1=Parents[j];
+		par2=Parents[j+1];
+		chick=p1.addCrossed(par1, par2);
+		chick.fitnessScaling=CSR;
+	}
+	self.active = 0;
+}
+
+5:100000 early() {
+	//adults (age>=4) and younglings (age>0) mortalities are multiplicatively determined by their genomic fitness, an age based survival coefficient estimated on real king penguin populations (Céline Le Bohec personal communication) and a scaling factor given by the ratio between carrying capacity and population size in order to keep population size constant around the set carrying capacity
+	AllInds=p1.individuals;
+	nonchicks=AllInds[AllInds.age>0];
+	if (size(nonchicks)>K){
+		KSF=K/size(nonchicks);
+		nonchicks.fitnessScaling=AgeBasedMortality[nonchicks.age]*KSF;
+	}
+	else{
+		nonchicks.fitnessScaling=AgeBasedMortality[nonchicks.age];
+	}
+	
+	//early callback burn-in sampling: only age classes sizes are measured before mortality event occurs
+	if (sim.cycle%stg_gen==0){
+		Chicks=AllInds[AllInds.age==0];
+		Younglings=nonchicks[nonchicks.age<FirstBreedingAge];
+		Adults=nonchicks[nonchicks.age>=FirstBreedingAge];
+		if (size(nonchicks)>K){
+			defineGlobal('stats_pre',sim.cycle + ',' + KSF + ',' + size(AllInds) + ',' + size(Chicks) + ',' + size(Younglings) + ',' + size(Adults));
+		}
+		else {
+			defineGlobal('stats_pre',sim.cycle + ',1,' + size(AllInds) + ',' + size(Chicks) + ',' + size(Younglings) + ',' + size(Adults));
+		}
+	}
+}
+
+5:100000 late(){
+	//late callback burn-in sampling
+	if (sim.cycle%stg_gen==0){
+		AllInds=p1.individuals;
+		Chicks=AllInds[AllInds.age==0];
+		nonchicks=AllInds[AllInds.age>0];
+		Younglings=nonchicks[nonchicks.age<FirstBreedingAge];
+		Adults=nonchicks[nonchicks.age>=FirstBreedingAge];
+		if (stg_ss<size(AllInds)){
+			samp=sample(AllInds,stg_ss);
+			fit=calcIndividualFitness(samp);
+			gen=samp.genomes;
+			totmuts=unique(gen.mutations);
+			neutmuts=totmuts[totmuts.mutationType==m0];
+			delmuts=totmuts[totmuts.mutationType!=m0];
+			m1muts=delmuts[delmuts.mutationType==m1];
+			m2muts=delmuts[delmuts.mutationType==m2];
+			m3muts=delmuts[delmuts.mutationType==m3];
+			indmuts=calcIndividualMutationNumber(samp);
+			writeFile('GEMnWF_K' + K + '_seed' + getSeed() + '_stg.csv',stats_pre + ',' + size(AllInds) + ',' + size(Chicks) + ',' + size(Younglings) + ',' + size(Adults) + ',' + mean(AllInds.age) + ',' + mean(fit) + ',' + size(totmuts) + ',' + size(neutmuts) + ',' + size(delmuts) + ',' + size(m1muts) + ',' + size(m2muts) + ',' + size(m3muts) + ',' + indmuts[0] + ',' + indmuts[1] + ',' + indmuts[2] + ',' + indmuts[3] + ',' + indmuts[4] + ',' + indmuts[5] + ',' + indmuts[6] + ',' + indmuts[7] + ',' + indmuts[8] + ',' + indmuts[9] + ',' + indmuts[10] + ',' + indmuts[11] + ',' + indmuts[12] + ',' + indmuts[13] + ',' + indmuts[14] + ',' + indmuts[15] + ',' + indmuts[16] + ',' + indmuts[17],T);
+		}
+		else{
+			fit=calcIndividualFitness(AllInds);
+			gen=AllInds.genomes;
+			totmuts=unique(gen.mutations);
+			neutmuts=totmuts[totmuts.mutationType==m0];
+			delmuts=totmuts[totmuts.mutationType!=m0];
+			m1muts=delmuts[delmuts.mutationType==m1];
+			m2muts=delmuts[delmuts.mutationType==m2];
+			m3muts=delmuts[delmuts.mutationType==m3];
+			indmuts=calcIndividualMutationNumber(AllInds);
+			writeFile('GEMnWF_K' + K + '_seed' + getSeed() + '_stg.csv',stats_pre + ',' + size(AllInds) + ',' + size(Chicks) + ',' + size(Younglings) + ',' + size(Adults) + ',' + mean(AllInds.age) + ',' + mean(fit) + ',' + size(totmuts) + ',' + size(neutmuts) + ',' + size(delmuts) + ',' + size(m1muts) + ',' + size(m2muts) + ',' + size(m3muts) + ',' + indmuts[0] + ',' + indmuts[1] + ',' + indmuts[2] + ',' + indmuts[3] + ',' + indmuts[4] + ',' + indmuts[5] + ',' + indmuts[6] + ',' + indmuts[7] + ',' + indmuts[8] + ',' + indmuts[9] + ',' + indmuts[10] + ',' + indmuts[11] + ',' + indmuts[12] + ',' + indmuts[13] + ',' + indmuts[14] + ',' + indmuts[15] + ',' + indmuts[16] + ',' + indmuts[17],T);
+		}
+	}
+	defineGlobal('stats_pre',NULL);
+	
+	if (sim.cycle==BurninEnd){
+		sim.outputFull("GEMnWF_K" + K + '_seed' + getSeed() + "_gen" + sim.cycle + "_oF", ages=T); //checkpoint: print outputFull file at the end of the burn-in 
+
+		//final pN/pS sampling: note that two kind of nonsyn/syn measurements are carried out, pnps=pN/pS pnps_alt=(pN-pS)/(pN+pS)
+		writeFile("GEMnWF_K" + K + '_seed' + getSeed() + ".csv","neutmuts,delmuts,m1muts,m2muts,m3muts,pnps,pnps_alt"); //genome stats
+		writeFile("GEMnWF_geneStats_K" + K + '_seed' + getSeed() + ".csv","rep,selCoeff,pnps,pnps_alt,neutmuts,delmuts,m1muts,m2muts,m3muts"); //gene stats
+		counter=1;
+		for (rep in 1:Replicas){
+			samp=p1.sampleIndividuals(SampleSize,minAge=5); //only adults are sampled for final pN/pS sampling
+			muts=unique(samp.genomes.mutations);
+			muts=muts[samp.genomes.mutationFrequenciesInGenomes(muts)<1.0]; //exclude mutations that are fixed within the sample
+			neutmuts=muts[muts.mutationType==m0];
+			delmuts=muts[muts.mutationType!=m0];
+			m1muts=delmuts[delmuts.mutationType==m1];
+			m2muts=delmuts[delmuts.mutationType==m2];
+			m3muts=delmuts[delmuts.mutationType==m3];
+			writeFile("GEMnWF_K" + K + '_seed' + getSeed() + ".csv",size(neutmuts) + ',' + size(delmuts) + ',' + size(m1muts) + ',' + size(m2muts) + ',' + size(m3muts) + ',' + size(delmuts)/size(neutmuts) + ',' + (size(delmuts)-size(neutmuts))/(size(delmuts)+size(neutmuts)),T);
+			geneStart=NULL;
+			for (i in 1:g){
+				geneStart=((i-1)*geneLength)+(i-1);
+				x=muts[muts.position>=geneStart];
+				mutsxgene=x[x.position<=(geneStart+geneLength-1)];
+				nm=mutsxgene[mutsxgene.mutationType==m0];
+				dm=mutsxgene[mutsxgene.mutationType!=m0];
+				m1m=dm[dm.mutationType==m1];
+				m2m=dm[dm.mutationType==m2];
+				m3m=dm[dm.mutationType==m3];
+				if (all(c(size(nm),size(dm))!=0)){
+					writeFile("GEMnWF_geneStats_K" + K + '_seed' + getSeed() + ".csv",rep + ',' + geneSelCoeff[i-1] + ',' + size(dm)/size(nm) + ',' + (size(dm)-size(nm))/(size(dm)+size(nm)) + ',' + size(nm) + ',' + size(dm) + ',' + size(m1m) + ',' + size(m2m) + ',' + size(m3m),T);
+				}
+				else {
+					if (all(c(size(nm),size(dm))==0)){
+						writeFile("GEMnWF_geneStats_K" + K + '_seed' + getSeed() + ".csv",rep + ',' + geneSelCoeff[i-1] + ',0/0,0/0,0,0,0,0,0',T);
+					}
+					else {
+						if (size(nm)==0){
+							writeFile("GEMnWF_geneStats_K" + K + '_seed' + getSeed() + ".csv",rep + ',' + geneSelCoeff[i-1] + ',n/0,' + (size(dm)-0)/(size(dm)+0) + ',0,' + size(dm) + ',' + size(m1m) + ',' + size(m2m) + ',' + size(m3m),T);
+						}
+						else {
+							if (size(dm)==0){
+								writeFile("GEMnWF_geneStats_K" + K + '_seed' + getSeed() + ".csv",rep + ',' + geneSelCoeff[i-1] + ',0/s,' + (0-size(nm))/(0+size(nm)) + ',' + size(nm) + ',0,0,0,0',T);
+							}
+						}
+					}
+				}
+			}
+		}
+		sim.simulationFinished();
+	}
+}
